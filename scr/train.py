@@ -1,9 +1,11 @@
 from dataclasses import dataclass
 import os
 from typing import Any, Dict, List, Tuple, TypedDict
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from tqdm.auto import tqdm
 
 from layer import (
     LSTMLayer,
@@ -140,6 +142,13 @@ class Trainer:
             cache_vector,
             self.max_batch_size
         )
+
+        total = len(self.train_dataset[0])
+        pbar = tqdm(
+            total=total,
+            desc='Training',
+            dynamic_ncols=True
+            )
         
         # 使用text_preprocess方法获取批次数据
         for batch in preprocessor:
@@ -152,7 +161,7 @@ class Trainer:
             batch_size = inputs.size(0)
             total_samples += batch_size
 
-            print(f"当前批次大小: {batch_size}")
+            pbar.update(batch_size)
             
             # 清除梯度
             self.optimizer.zero_grad()
@@ -169,8 +178,6 @@ class Trainer:
 
             # 应用标签嵌入计算logits
             logits = self.label_embedding(semantic_vector)
-
-            print(f"当前批次输出样例： {F.softmax(logits[0], dim=0)}")
             
             # 计算损失
             loss = self.criterion(logits, targets) + self.l2_lambda * l2_loss
@@ -194,6 +201,8 @@ class Trainer:
             _, true_labels = torch.max(targets, 1)
             correct += (predicted == true_labels).sum().item()
         
+        pbar.close()
+
         # 计算平均损失和准确率
         avg_loss = total_loss / total_samples
         accuracy = correct / total_samples
@@ -248,6 +257,13 @@ class Trainer:
             cache_vector = cache_vector, 
             max_batch_size = self.max_batch_size
         )
+
+        total = len(dataset[0])
+        pbar = tqdm(
+            total=total,
+            desc=split,
+            dynamic_ncols=True
+            )
         
         with torch.no_grad():
             for batch in preprocessor:
@@ -259,6 +275,8 @@ class Trainer:
                 
                 batch_size = inputs.size(0)
                 total_samples += batch_size
+
+                pbar.update(batch_size)
                 
                 # 前向传播
                 lstm_output, _ = self.lstm_layer(inputs)
@@ -282,7 +300,9 @@ class Trainer:
                 _, predicted = torch.max(logits, 1)
                 _, true_labels = torch.max(targets, 1)
                 correct += (predicted == true_labels).sum().item()
-        
+                
+        pbar.close()
+
         # 计算平均损失和准确率
         avg_loss = total_loss / total_samples if total_samples > 0 else float('inf')
         accuracy = correct / total_samples if total_samples > 0 else 0
@@ -330,10 +350,66 @@ class Trainer:
         print(f"模型已保存到 {model_path}")
 
 
+def visualize_training_history(history):
+    """
+    可视化训练过程中的损失和准确率变化
+    
+    参数:
+        history: 包含训练记录的字典，结构为:
+            {
+                'train': [(train_loss, train_acc), ...],
+                'val': [(val_loss, val_acc), ...]
+            }
+    
+    返回:
+        fig: matplotlib的Figure对象
+        axs: 包含两个Axes子图对象的数组
+    """
+    # 提取训练数据
+    train_loss = [epoch[0] for epoch in history['train']]
+    train_acc = [epoch[1] for epoch in history['train']]
+    
+    # 提取验证数据
+    val_loss = [epoch[0] for epoch in history['val']]
+    val_acc = [epoch[1] for epoch in history['val']]
+    
+    # 创建画布和子图
+    fig, axs = plt.subplots(1, 2, figsize=(15, 5))
+    
+    # 绘制损失曲线
+    axs[0].plot(train_loss, label='Training Loss', color='blue')
+    axs[0].plot(val_loss, label='Validation Loss', color='orange')
+    axs[0].set_title('Loss Curve')
+    axs[0].set_xlabel('Epochs')
+    axs[0].set_ylabel('Loss')
+    axs[0].grid(True, linestyle='--', alpha=0.5)
+    axs[0].legend()
+    
+    # 绘制准确率曲线
+    axs[1].plot(train_acc, label='Training Accuracy', color='blue')
+    axs[1].plot(val_acc, label='Validation Accuracy', color='orange')
+    axs[1].set_title('Accuracy Curve')
+    axs[1].set_xlabel('Epochs')
+    axs[1].set_ylabel('Accuracy')
+    axs[1].grid(True, linestyle='--', alpha=0.5)
+    axs[1].legend()
+    
+    plt.tight_layout()
+    return fig, axs
+
+
 if __name__ == "__main__":
     # 设置参数
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"当前设备: {device}")
+
+    sentiment_data_path = r"dataset\test.csv"
+    model_save_folder = r"models"
+    graph_save_folder = r'graph'
+
+    sentiment_labels: List[str] = ['well', 'normal', 'snicker', 'self-satisfied', 'shocked', 'a bit down', 'laugh', 'angry']
+    # sentiment_labels: List[str] = ['positive', 'negative', 'neutral']
+    num_classes = len(sentiment_labels)
 
     dtype = torch.float32
 
@@ -344,15 +420,8 @@ if __name__ == "__main__":
 
     max_batch_size = 2
 
-    # sentiment_labels: List[str] = ['well', 'normal', 'snicker', 'self_satisfaction', 'shocked', 'a bit down', 'laugh', 'angry']
-    sentiment_labels: List[str] = ['positive', 'negative', 'neutral']
-    num_classes = len(sentiment_labels)
-
     learning_rate = 1e-5
-    num_epochs = 3
-
-    sentiment_data_path = "path/to/sentiment_data.csv"  # 数据集路径
-    model_save_folder = "path/to/model_save_folder"  # 模型保存文件夹路径
+    num_epochs = 5
 
     bidirectional = True  # 是否使用双向LSTM
     
@@ -437,18 +506,27 @@ if __name__ == "__main__":
     best_val_acc = 0
     patience = 5
     counter = 0
+
+    history = {'train': [], 'val': []}
     
-    for epoch in range(num_epochs):
+    epoch = 0
+    while epoch < num_epochs:
+
+        print(f"Epoch [{epoch+1}/{num_epochs}]")
+
         train_loss, train_acc = trainer.train_epoch()
+        history['train'].append((train_loss, train_acc))
+
         val_loss, val_accuracy = trainer.evaluate()
+        history['val'].append((val_loss, val_accuracy))
         
-        print(f"Epoch [{epoch+1}/{num_epochs}], "
-              f"train loss: {train_loss:.4f}, "
+        print(f"train loss: {train_loss:.4f}, "
               f"train accuracy: {train_acc:.4f}, "
               f"val loss: {val_loss:.4f}, "
               f"val accuracy: {val_accuracy:.4f}")
         
         trainer.save_model(model_save_folder, epoch+1)
+        
         # 早停机制
         if val_accuracy > best_val_acc:
             best_val_acc = val_accuracy
@@ -459,9 +537,26 @@ if __name__ == "__main__":
         else:
             counter += 1
             if counter >= patience:
-                print(f'early stop at epoch {epoch+1}')
-                break
-    
+                if_early_stop = input(f'The accuracy of verification has not increased in {counter} epochs, stop training?[y/n]: ')
+                if if_early_stop == 'y':
+                    break
+                print('Continue training...')
+
+        epoch += 1
+
+        if epoch == num_epochs:
+            figure, axes = visualize_training_history(history)
+            figure.savefig(f'{graph_save_folder}/training_history.png', dpi=300, bbox_inches='tight')
+            print('training_history.png is saved')
+
+            if_continue = input('Continue Training?[y/n]').lower()
+            if if_continue == 'y':
+                add_num_epochs = int(input('Add epochs: '))
+                max_batch_size = int(input('Max batch size: '))
+                trainer.max_batch_size = max_batch_size
+
+                num_epochs += add_num_epochs
+
     # 在测试集上评估模型
     test_loss, test_accuracy = trainer.evaluate(split='test')
     print(f"test loss: {test_loss:.4f}, test accuracy: {test_accuracy:.4f}")

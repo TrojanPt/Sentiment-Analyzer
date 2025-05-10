@@ -69,9 +69,6 @@ def text_preprocess(
             text = texts[idx]
             label = labels[idx]
             
-            # 打印进度
-            print(f'processing text {idx+1}/{len(texts)}')
-            
             # 分词并嵌入
             tokens = textpreprocessor.tokenizer.list(text)
             vector = []

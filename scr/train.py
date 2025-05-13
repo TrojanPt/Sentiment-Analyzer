@@ -1,23 +1,24 @@
-from dataclasses import dataclass
+
 import os
 from typing import Any, Dict, List, Tuple, TypedDict
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from tqdm.auto import tqdm
 
 from layer import (
     LSTMLayer,
     BiLSTMWrapper,
     StackedLSTM, 
-    AttentionLayer, 
+    AttentionLayer,
+    MultiHeadAttention,
     FCLayer, 
     LabelEmbedding,
     LabelSmoothingLoss
 )
 
-from dataset import SentimentDataset
+from dataset_managers import SentimentDataset
 
 from textprocess import (
     TextPreprocessor, 
@@ -36,6 +37,7 @@ class ModelConfig(TypedDict):
     hidden_dim: int
     num_layers: int
     bidirectional: bool
+    num_heads: int
     fc_hidden_sizes: List[int]
     output_size: int
 
@@ -55,7 +57,7 @@ class Trainer:
             self, 
 
             lstm_layer: LSTMLayer,
-            attention_layer: AttentionLayer,
+            attention_layer: MultiHeadAttention,
             fc_layer: FCLayer,
             label_embedding: LabelEmbedding,
 
@@ -112,8 +114,11 @@ class Trainer:
 
         self.l2_lambda = l2_lambda
 
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=3
+        # self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        #     optimizer, mode='min', factor=0.5, patience=3
+        # )
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=10, eta_min=1e-6
         )
 
         self.is_first_train_epoch = True
@@ -342,6 +347,7 @@ class Trainer:
                             len(self.lstm_layer.lstm_layers),
                 'bidirectional': self.lstm_layer.bidirectional if hasattr(self.lstm_layer, 'bidirectional') else 
                                 isinstance(self.lstm_layer.lstm_layers[0], BiLSTMWrapper),
+                'num_heads': self.attention_layer.num_heads,
                 'fc_hidden_sizes': [m.out_features for m in self.fc_layer.fc_layers if isinstance(m, nn.Linear)][:-1],
                 'output_size': [m.out_features for m in self.fc_layer.fc_layers if isinstance(m, nn.Linear)][-1]
             }
@@ -403,27 +409,28 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"当前设备: {device}")
 
-    sentiment_data_path = r"dataset\test.csv"
+    sentiment_data_path = r"dataset\3 - Labels\Sentiment_Analysis_DataSet_3675.csv"
     model_save_folder = r"models"
     graph_save_folder = r'graph'
 
-    sentiment_labels: List[str] = ['well', 'normal', 'snicker', 'self-satisfied', 'shocked', 'a bit down', 'laugh', 'angry']
-    # sentiment_labels: List[str] = ['positive', 'negative', 'neutral']
+    # sentiment_labels: List[str] = ['well', 'normal', 'snicker', 'self-satisfied', 'shocked', 'a bit down', 'laugh', 'angry']
+    sentiment_labels: List[str] = ['positive', 'negative', 'neutral']
     num_classes = len(sentiment_labels)
 
     dtype = torch.float32
 
     embedding_dim = 1024
-    hidden_dim = 2048
-    num_layers = 4
+    hidden_dim = 1024
+    num_layers = 2
 
-
-    max_batch_size = 2
+    max_batch_size = 8
 
     learning_rate = 1e-5
-    num_epochs = 5
+    num_epochs = 10
 
     bidirectional = True  # 是否使用双向LSTM
+
+    apply_augmentation = True  # 是否应用数据增强
     
     # 初始化分词器和嵌入模型
     tokenizer = JiebaTokenizer()
@@ -442,10 +449,11 @@ if __name__ == "__main__":
         label=sentiment_labels,
         device=device,
         dtype=dtype,
-        val_size=0.1,
-        test_size=0.2
+        val_size=0.2,
+        test_size=0.1,
+        apply_augmentation=apply_augmentation
     )
-    
+
     # 初始化模型
     lstm_layer = StackedLSTM(
         input_size=embedding_dim, 
@@ -456,7 +464,11 @@ if __name__ == "__main__":
         bidirectional=bidirectional  # 使用双向LSTM
     )
 
-    attention_layer = AttentionLayer(hidden_size=hidden_dim * 2 if bidirectional else hidden_dim)
+    attention_layer = MultiHeadAttention(
+        hidden_size = hidden_dim * 2 if bidirectional else hidden_dim, 
+        num_heads = 8,
+        dropout = 0.2 
+    )
 
     fc_layer = FCLayer(
         input_size=hidden_dim * 2 if bidirectional else hidden_dim,
@@ -550,15 +562,20 @@ if __name__ == "__main__":
             print('training_history.png is saved')
 
             if_continue = input('Continue Training?[y/n]').lower()
-            if if_continue == 'y':
-                add_num_epochs = int(input('Add epochs: '))
-                max_batch_size = int(input('Max batch size: '))
-                trainer.max_batch_size = max_batch_size
+            if if_continue == 'n':
+                break
+            add_num_epochs = int(input('Add epochs: '))
+            max_batch_size = int(input('Max batch size: '))
+            trainer.max_batch_size = max_batch_size
 
-                num_epochs += add_num_epochs
+            num_epochs += add_num_epochs
 
     # 在测试集上评估模型
     test_loss, test_accuracy = trainer.evaluate(split='test')
     print(f"test loss: {test_loss:.4f}, test accuracy: {test_accuracy:.4f}")
 
     print(f'Best model path: {best_model_path}')
+
+    figure, axes = visualize_training_history(history)
+    figure.savefig(f'{graph_save_folder}/training_history.png', dpi=300, bbox_inches='tight')
+    print('training_history.png is saved')

@@ -5,7 +5,8 @@ from .lstm_layer import (
 )
 
 from .attention_layer import (
-    AttentionLayer
+    AttentionLayer,
+    MultiHeadAttention,
 )
 
 from .fc_layer import (

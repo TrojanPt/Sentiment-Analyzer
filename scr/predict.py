@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from layer import StackedLSTM, AttentionLayer, FCLayer, LabelEmbedding
+from layer import StackedLSTM, MultiHeadAttention, FCLayer, LabelEmbedding
 
 from textprocess import (
     BGEm3EmbeddingModel,
@@ -32,7 +32,11 @@ def load_model(model_path, device, dtype):
     
     # 创建注意力层
     attention_hidden_size = config['hidden_dim'] * 2 if config['bidirectional'] else config['hidden_dim']
-    attention_layer = AttentionLayer(hidden_size=attention_hidden_size)
+    attention_layer = MultiHeadAttention(
+        hidden_size = attention_hidden_size,
+        num_heads=config['num_heads'],
+        dropout=0.0
+    )
     
     # 创建全连接层
     fc_layer = FCLayer(
@@ -173,7 +177,6 @@ if __name__ == "__main__":
         dtype = dtype
         )
 
-    # 创建标签到索引的反向映射
     labels = config['labels']
 
     # 初始化分词器和嵌入模型

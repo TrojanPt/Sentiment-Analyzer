@@ -9,11 +9,11 @@ import torch
 
 class EmbeddingModel(ABC):
     """嵌入式模型基类"""
-    def __init__(self, embedding_dim: int, device: str, dtype: torch.dtype):
+    def __init__(self, embedding_dim: int, device: torch.device, dtype: torch.dtype):
         """
         Args:
             embedding_dim (int): 嵌入维度
-            device (str): 设备类型
+            device (torch.device): 设备类型
             dtype (torch.dtype): 数据类型
         """
         self.embedding_dim = embedding_dim
@@ -48,10 +48,12 @@ class EmbeddingModel(ABC):
 class BGEm3EmbeddingModel(EmbeddingModel):
     """基于BGEm3的嵌入式模型"""
     
-    def __init__(self, embedding_dim: int, device: str, dtype: torch.dtype):
+    def __init__(self, embedding_dim: int, device: torch.device, dtype: torch.dtype):
         """
         Args:
             embedding_dim (int): 嵌入维度
+            device (torch.device): 设备类型
+            dtype (torch.dtype): 数据类型
         """
         super().__init__(embedding_dim, device, dtype)
         
@@ -94,7 +96,7 @@ class OpenAIEmbeddingModel(EmbeddingModel):
     def __init__(
             self, 
             embedding_dim: int,
-            device: str,
+            device: torch.device,
             dtype: torch.dtype,
             api_base_url: str = 'https://api.openai.com',
             api_key: str = '',
@@ -103,7 +105,7 @@ class OpenAIEmbeddingModel(EmbeddingModel):
         """
         Args:
             embedding_dim (int): 嵌入维度
-            device (str): 设备类型
+            device (torch.device): 设备类型
             dtype (torch.dtype): 数据类型
             api_base_url (str): URL
             api_key (str): API密钥

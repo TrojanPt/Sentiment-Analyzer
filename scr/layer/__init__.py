@@ -6,7 +6,7 @@ from .lstm_layer import (
 
 from .attention_layer import (
     AttentionLayer,
-    MultiHeadAttention,
+    MultiHeadAttention
 )
 
 from .fc_layer import (
@@ -18,5 +18,6 @@ from .label_embedding import (
 )
 
 from .loss import (
-    LabelSmoothingLoss
+    LabelSmoothingLoss,
+    SemanticWeightedLoss
 )

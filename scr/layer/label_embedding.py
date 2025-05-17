@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 
 class LabelEmbedding(nn.Module):
-    """可训练的标签嵌入"""
+    """标签嵌入"""
     
     def __init__(self, labels: List[str], embedding_model):
         """
@@ -30,7 +30,7 @@ class LabelEmbedding(nn.Module):
         # 将初始嵌入堆叠为张量
         initial_embeddings = torch.stack(initial_embeddings)
         
-        # 创建可训练的嵌入参数
+        # 创建嵌入参数
         self.label_embeddings = nn.Parameter(initial_embeddings)
         
     def forward(self, model_output: torch.Tensor) -> torch.Tensor:

@@ -173,7 +173,15 @@ class BiLSTMWrapper(nn.Module):
 
 class StackedLSTM(nn.Module):
     """堆叠多层LSTM"""
-    def __init__(self, input_size, hidden_size, num_layers, device, dropout=0.2, bidirectional=False):
+    def __init__(
+            self, 
+            input_size: int,
+            hidden_size: int,
+            num_layers: int,
+            device: torch.device,
+            dropout: float = 0.2,
+            bidirectional: bool = False
+            ):
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size

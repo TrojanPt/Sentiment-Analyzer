@@ -14,7 +14,7 @@ class SentimentDataset:
             self, 
             file_path: str, 
             label, 
-            device: str,
+            device: torch.device,
             dtype: torch.dtype,
             val_size: float = 0.1, 
             test_size: float = 0.2,
@@ -24,7 +24,7 @@ class SentimentDataset:
         Args:
             file_path (str): 数据文件路径
             label (List[str]): 标签列表
-            device (str): 设备
+            device (torch.device): 设备类型
             dtype (torch.dtype): 数据类型
             val_size (float): 验证集比例
             test_size (float): 测试集比例
@@ -64,7 +64,7 @@ class SentimentDataset:
         
         return dict
 
-    def _load_data(self) -> Tuple[List[str], List[torch.Tensor]]:
+    def _load_data(self) -> None:
         """
         加载数据
         """
@@ -79,7 +79,7 @@ class SentimentDataset:
             self, 
             val_size: float = 0.1, 
             test_size: float = 0.2
-            ) -> Tuple[Tuple[List[str], List[torch.Tensor]], Tuple[List[str], List[torch.Tensor]], Tuple[List[str], List[torch.Tensor]]]:
+            ) -> None:
         """
         划分训练集、验证集和测试集
 
@@ -149,7 +149,7 @@ class SentimentDataset:
         else:
             raise ValueError(f"未知的数据集分割: {split}")
     
-    def get_cached_vectors(self, split: str) -> List[torch.Tensor]:
+    def get_cached_vectors(self, split: str) -> List[torch.Tensor] | None:
         """
         获取缓存的向量
         

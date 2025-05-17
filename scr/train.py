@@ -15,7 +15,8 @@ from layer import (
     MultiHeadAttention,
     FCLayer, 
     LabelEmbedding,
-    LabelSmoothingLoss
+    LabelSmoothingLoss,
+    SemanticWeightedLoss
 )
 
 from dataset_managers import SentimentDataset
@@ -56,14 +57,14 @@ class Trainer:
     def __init__(
             self, 
 
-            lstm_layer: LSTMLayer,
+            lstm_layer: StackedLSTM,
             attention_layer: MultiHeadAttention,
             fc_layer: FCLayer,
             label_embedding: LabelEmbedding,
 
             optimizer: torch.optim.Optimizer,
             criterion: nn.Module,
-            device: str,
+            device: torch.device,
             dtype: torch.dtype,
 
             textpreprocessor: TextPreprocessor,
@@ -76,14 +77,14 @@ class Trainer:
             ):
         """
         Args:
-            lstm_layer (LSTMLayer): LSTM层
+            lstm_layer (StackedLSTM): 堆叠LSTM层
             attention_layer (AttentionLayer): 注意力层
             fc_layer (FCLayer): 全连接层
             label_embedding (LabelEmbedding): 标签嵌入层
 
             optimizer (torch.optim.Optimizer): 优化器
             criterion (nn.Module): 损失函数
-            device (str): 计算设备
+            device (torch.device): 计算设备
             dtype (torch.dtype): 数据类型
 
             textpreprocessor (TextPreprocessor): 文本预处理器
@@ -114,12 +115,12 @@ class Trainer:
 
         self.l2_lambda = l2_lambda
 
-        # self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        #     optimizer, mode='min', factor=0.5, patience=3
-        # )
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=10, eta_min=1e-6
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=3
         )
+        # self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        #     optimizer, T_max=10, eta_min=1e-6
+        # )
 
         self.is_first_train_epoch = True
         self.is_first_eval_epoch = True
@@ -185,8 +186,13 @@ class Trainer:
             logits = self.label_embedding(semantic_vector)
             
             # 计算损失
-            loss = self.criterion(logits, targets) + self.l2_lambda * l2_loss
-            
+            loss = self.criterion(
+                logits, 
+                targets, 
+                self.label_embedding.label_embeddings,
+                self.dataset.train_class_weights
+                ) + self.l2_lambda * l2_loss
+
             # 反向传播
             loss.backward()
             
@@ -220,7 +226,7 @@ class Trainer:
             if collected_vectors is not None:
                 self.dataset.cache_vectors('train', collected_vectors)
                 self.is_first_train_epoch = False
-                print(f"训练数据嵌入向量缓存成功，大小: {len(collected_vectors)}")
+                print(f'The embedding vectors of training data have been cached successfully, size: {len(collected_vectors)}')
             else:
                 raise ValueError("没有收集到训练数据的嵌入向量，请检查数据预处理。")
         
@@ -240,14 +246,21 @@ class Trainer:
 
         if split == 'val':
             dataset = self.val_dataset
+            class_weights = self.dataset.val_class_weights
         elif split == 'test':
             dataset = self.test_dataset
+            class_weights = self.dataset.test_class_weights
         else:
             raise ValueError("未知的数据集类型，请选择 'val' 或 'test'。")
         
         total_loss = 0.0
         total_samples = 0
         correct = 0
+
+        # 初始化每个标签的准确率统计
+        num_classes = len(self.label_embedding.labels)
+        class_correct = [0] * num_classes  # 每个标签预测正确的样本数
+        class_total = [0] * num_classes    # 每个标签的总样本数
 
         if split == 'val' and not self.is_first_eval_epoch:
             cache_vector = self.dataset.get_cached_vectors('val')
@@ -296,7 +309,12 @@ class Trainer:
                 logits = self.label_embedding(semantic_vector)
                 
                 # 计算损失
-                loss = self.criterion(logits, targets) + self.l2_lambda * l2_loss
+                loss = self.criterion(
+                    logits, 
+                    targets, 
+                    self.label_embedding.label_embeddings,
+                    class_weights
+                    ) + self.l2_lambda * l2_loss
                 
                 # 累计损失
                 total_loss += loss.item() * batch_size
@@ -306,12 +324,27 @@ class Trainer:
                 _, true_labels = torch.max(targets, 1)
                 correct += (predicted == true_labels).sum().item()
                 
+                # 统计每个标签的准确率
+                for i in range(batch_size):
+                    label = true_labels[i].item()
+                    label = int(label)
+                    class_total[label] += 1
+                    if predicted[i] == true_labels[i]:
+                        class_correct[label] += 1
+
         pbar.close()
 
         # 计算平均损失和准确率
         avg_loss = total_loss / total_samples if total_samples > 0 else float('inf')
         accuracy = correct / total_samples if total_samples > 0 else 0
 
+        # 打印每个标签的准确率
+        print(f"\nThe accuracy of {split} set:")
+        for i in range(num_classes):
+            label_name = self.label_embedding.labels[i]
+            label_acc = class_correct[i] / class_total[i] if class_total[i] > 0 else 0
+            print(f"  {label_name}: {label_acc:.4f} ({class_correct[i]}/{class_total[i]})")
+            
         if split == 'val' and self.is_first_eval_epoch:
             collected_vectors = preprocessor.get_collected_vectors()
             if collected_vectors is not None:
@@ -329,31 +362,33 @@ class Trainer:
         
         # 保存模型组件状态
         model_path = os.path.join(save_path, f"sentiment_model_epoch_{epoch}.pth")
-        model_state : ModelState = {
-            'lstm': self.lstm_layer.state_dict(),
-            'attention': self.attention_layer.state_dict(),
-            'fc': self.fc_layer.state_dict(),
-            'label_embedding': self.label_embedding.state_dict(),
-            # 保存优化器状态
-            'optimizer': self.optimizer.state_dict(),
-            # 额外保存模型配置信息
-            'config': {
-                'labels': self.label_embedding.labels,
-                'embedding_dim': self.lstm_layer.input_size if hasattr(self.lstm_layer, 'input_size') else 
-                            self.lstm_layer.lstm_layers[0].input_size,
-                'hidden_dim': self.lstm_layer.hidden_size if hasattr(self.lstm_layer, 'hidden_size') else 
-                            self.lstm_layer.lstm_layers[0].hidden_size,
-                'num_layers': self.lstm_layer.num_layers if hasattr(self.lstm_layer, 'num_layers') else 
-                            len(self.lstm_layer.lstm_layers),
-                'bidirectional': self.lstm_layer.bidirectional if hasattr(self.lstm_layer, 'bidirectional') else 
-                                isinstance(self.lstm_layer.lstm_layers[0], BiLSTMWrapper),
-                'num_heads': self.attention_layer.num_heads,
-                'fc_hidden_sizes': [m.out_features for m in self.fc_layer.fc_layers if isinstance(m, nn.Linear)][:-1],
-                'output_size': [m.out_features for m in self.fc_layer.fc_layers if isinstance(m, nn.Linear)][-1]
+        try:
+            model_state : ModelState = {
+                'lstm': self.lstm_layer.state_dict(),
+                'attention': self.attention_layer.state_dict(),
+                'fc': self.fc_layer.state_dict(),
+                'label_embedding': self.label_embedding.state_dict(),
+                # 保存优化器状态
+                'optimizer': self.optimizer.state_dict(),
+                # 额外保存模型配置信息
+                'config': {
+                    'labels': self.label_embedding.labels,
+                    'embedding_dim': self.lstm_layer.input_size,
+                    'hidden_dim': self.lstm_layer.hidden_size,
+                    'num_layers': self.lstm_layer.num_layers if hasattr(self.lstm_layer, 'num_layers') else 
+                                len(self.lstm_layer.lstm_layers),
+                    'bidirectional': self.lstm_layer.bidirectional if hasattr(self.lstm_layer, 'bidirectional') else 
+                                    isinstance(self.lstm_layer.lstm_layers[0], BiLSTMWrapper),
+                    'num_heads': self.attention_layer.num_heads,
+                    'fc_hidden_sizes': [m.out_features for m in self.fc_layer.fc_layers if isinstance(m, nn.Linear)][:-1],
+                    'output_size': [m.out_features for m in self.fc_layer.fc_layers if isinstance(m, nn.Linear)][-1]
+                }
             }
-        }
-        torch.save(model_state, model_path)
-        print(f"模型已保存到 {model_path}")
+            torch.save(model_state, model_path)
+            print(f"模型已保存到 {model_path}")
+
+        except Exception as e:
+            print(f"保存模型时出错: {e}")
 
 
 def visualize_training_history(history):
@@ -379,12 +414,15 @@ def visualize_training_history(history):
     val_loss = [epoch[0] for epoch in history['val']]
     val_acc = [epoch[1] for epoch in history['val']]
     
+    # 横坐标
+    epochs = range(1, len(train_loss) + 1)
+    
     # 创建画布和子图
     fig, axs = plt.subplots(1, 2, figsize=(15, 5))
     
     # 绘制损失曲线
-    axs[0].plot(train_loss, label='Training Loss', color='blue')
-    axs[0].plot(val_loss, label='Validation Loss', color='orange')
+    axs[0].plot(epochs, train_loss, label='Training Loss', color='blue')
+    axs[0].plot(epochs, val_loss, label='Validation Loss', color='orange')
     axs[0].set_title('Loss Curve')
     axs[0].set_xlabel('Epochs')
     axs[0].set_ylabel('Loss')
@@ -392,8 +430,8 @@ def visualize_training_history(history):
     axs[0].legend()
     
     # 绘制准确率曲线
-    axs[1].plot(train_acc, label='Training Accuracy', color='blue')
-    axs[1].plot(val_acc, label='Validation Accuracy', color='orange')
+    axs[1].plot(epochs, train_acc, label='Training Accuracy', color='blue')
+    axs[1].plot(epochs, val_acc, label='Validation Accuracy', color='orange')
     axs[1].set_title('Accuracy Curve')
     axs[1].set_xlabel('Epochs')
     axs[1].set_ylabel('Accuracy')
@@ -409,12 +447,12 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"当前设备: {device}")
 
-    sentiment_data_path = r"dataset\3 - Labels\Sentiment_Analysis_DataSet_3675.csv"
+    sentiment_data_path = r"dataset\8 - Labels\Sentiment_Analysis_DataSet_Full.csv"
     model_save_folder = r"models"
     graph_save_folder = r'graph'
 
-    # sentiment_labels: List[str] = ['well', 'normal', 'snicker', 'self-satisfied', 'shocked', 'a bit down', 'laugh', 'angry']
-    sentiment_labels: List[str] = ['positive', 'negative', 'neutral']
+    sentiment_labels: List[str] = ['well', 'normal', 'snicker', 'self-satisfied', 'shocked', 'a bit down', 'laugh', 'angry']
+    # sentiment_labels: List[str] = ['positive', 'negative', 'neutral']
     num_classes = len(sentiment_labels)
 
     dtype = torch.float32
@@ -423,14 +461,14 @@ if __name__ == "__main__":
     hidden_dim = 1024
     num_layers = 2
 
-    max_batch_size = 8
+    max_batch_size = 32
 
-    learning_rate = 1e-5
+    learning_rate = 5e-6
     num_epochs = 10
 
     bidirectional = True  # 是否使用双向LSTM
 
-    apply_augmentation = True  # 是否应用数据增强
+    apply_augmentation = False  # 是否应用数据增强
     
     # 初始化分词器和嵌入模型
     tokenizer = JiebaTokenizer()
@@ -460,14 +498,14 @@ if __name__ == "__main__":
         hidden_size=hidden_dim,
         num_layers=num_layers,  # 堆叠LSTM层数
         device=device,
-        dropout=0.2,
+        dropout=0.3,
         bidirectional=bidirectional  # 使用双向LSTM
     )
 
     attention_layer = MultiHeadAttention(
         hidden_size = hidden_dim * 2 if bidirectional else hidden_dim, 
         num_heads = 8,
-        dropout = 0.2 
+        dropout = 0.3
     )
 
     fc_layer = FCLayer(
@@ -484,13 +522,28 @@ if __name__ == "__main__":
     optimizer = torch.optim.AdamW(
         list(lstm_layer.parameters()) + 
         list(attention_layer.parameters()) + 
-        list(fc_layer.parameters()) +
-        list(label_embedding.parameters()),
+        list(fc_layer.parameters()),
+        # list(label_embedding.parameters()),    # 不对标签嵌入参数进行更新
         lr=learning_rate,
         weight_decay=0.01
     )
     
-    criterion = LabelSmoothingLoss(classes=num_classes)
+    # # 使用标签平滑损失函数
+    # criterion = LabelSmoothingLoss(
+    #     classes=num_classes, 
+    #     smoothing=0.05, 
+    #     reduction='mean',
+    #     gamma=2.0
+    #     )
+    
+    # 使用语义加权损失函数
+    criterion = SemanticWeightedLoss(
+        classes=num_classes, 
+        smoothing=0.05,
+        semantic_weight=0.5,
+        gamma=2.0,
+        reduction='mean'
+    )
 
     # 初始化训练器
     trainer = Trainer(
@@ -510,20 +563,19 @@ if __name__ == "__main__":
 
         max_batch_size=max_batch_size,
 
-        l2_lambda=0.001
+        l2_lambda=0.002
     )
     
     # 训练模型
     print("Starting training...")
     best_val_acc = 0
-    patience = 5
+    patience = 20
     counter = 0
 
     history = {'train': [], 'val': []}
     
     epoch = 0
     while epoch < num_epochs:
-
         print(f"Epoch [{epoch+1}/{num_epochs}]")
 
         train_loss, train_acc = trainer.train_epoch()
@@ -537,7 +589,9 @@ if __name__ == "__main__":
               f"val loss: {val_loss:.4f}, "
               f"val accuracy: {val_accuracy:.4f}")
         
-        trainer.save_model(model_save_folder, epoch+1)
+        if (epoch + 1) % 5 == 0:
+            # 保存模型
+            trainer.save_model(model_save_folder, epoch+1)
         
         # 早停机制
         if val_accuracy > best_val_acc:
@@ -545,13 +599,17 @@ if __name__ == "__main__":
             counter = 0
             # 记录最佳模型
             print(f"Best model saved at epoch {epoch+1}")
-            best_model_path = os.path.join(model_save_folder, f"sentiment_model_epoch_{epoch+1}.pth")
+            best_model = f"sentiment_model_epoch_{epoch+1}"
         else:
             counter += 1
             if counter >= patience:
                 if_early_stop = input(f'The accuracy of verification has not increased in {counter} epochs, stop training?[y/n]: ')
                 if if_early_stop == 'y':
+                    figure, axes = visualize_training_history(history)
+                    figure.savefig(f'{graph_save_folder}/training_history.png', dpi=300, bbox_inches='tight')
+                    print('training_history.png is saved')
                     break
+                
                 print('Continue training...')
 
         epoch += 1
@@ -570,12 +628,7 @@ if __name__ == "__main__":
 
             num_epochs += add_num_epochs
 
+    print(f"Training completed. Best model: {best_model}")
     # 在测试集上评估模型
     test_loss, test_accuracy = trainer.evaluate(split='test')
     print(f"test loss: {test_loss:.4f}, test accuracy: {test_accuracy:.4f}")
-
-    print(f'Best model path: {best_model_path}')
-
-    figure, axes = visualize_training_history(history)
-    figure.savefig(f'{graph_save_folder}/training_history.png', dpi=300, bbox_inches='tight')
-    print('training_history.png is saved')
